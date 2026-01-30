@@ -17,7 +17,7 @@ class Config:
     # ==================== Model Settings ====================
     
     # Embedding model
-    EMBEDDING_MODEL = "models/embedding-001"
+    EMBEDDING_MODEL = "models/text-embedding-004"
     
     # LLM model for generation
     # Options: "gemini-flash-latest", "gemini-1.5-pro-latest"

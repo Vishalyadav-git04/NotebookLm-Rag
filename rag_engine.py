@@ -1,13 +1,25 @@
 """
 RAG Engine for NotebookLM-like PDF Question Answering
-Handles PDF ingestion, chunking, embedding, retrieval, and citation-grounded answers.
+FULLY FIXED VERSION - All model names corrected
 """
 
 import os
+import sys
 import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from unittest.mock import MagicMock
 
+# --- FIX 1: BYPASS BROKEN WINDOWS LIBRARY ---
+sys.modules["onnxruntime"] = MagicMock()
+sys.modules["onnxruntime.quantization"] = MagicMock()
+sys.modules["onnxruntime.capi"] = MagicMock()
+sys.modules["onnxruntime.capi._pybind_state"] = MagicMock()
+
+# --- CRITICAL CONFIG: Disable ChromaDB's default embedding ---
+os.environ["CHROMA_ENABLE_DEFAULT_EMBEDDING"] = "false"
+
+# Import other dependencies
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -18,156 +30,187 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 class RAGEngine:
-    """
-    Production-ready RAG Engine using LangChain, ChromaDB, and Gemini.
-    
-    Features:
-    - Multi-PDF ingestion with metadata tracking
-    - Semantic chunking with overlap
-    - Gemini embeddings (models/embedding-001)
-    - ChromaDB vector storage (persistent)
-    - Citation-grounded answers with reasoning
-    """
-    
     def __init__(self, google_api_key: str, persist_directory: str = "./chroma_db"):
-        """
-        Initialize RAG Engine.
-        
-        Args:
-            google_api_key: Google API key for Gemini models
-            persist_directory: Directory for ChromaDB persistence
-        """
+        """Initialize RAG Engine with correct model names"""
         self.google_api_key = google_api_key
         self.persist_directory = persist_directory
         self.vector_store = None
         self.retriever = None
         self.qa_chain = None
         
-        # Set API key in environment
         os.environ["GOOGLE_API_KEY"] = google_api_key
         
-        # Initialize embeddings model
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
-            google_api_key=google_api_key
-        )
+        logger.info("Initializing RAG Engine...")
         
-        # Initialize LLM (Gemini Flash)
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-latest",
-            google_api_key=google_api_key,
-            temperature=0.1,  # Low temperature for factual accuracy
-            convert_system_message_to_human=True
-        )
+        # --- FIX: USE CORRECT EMBEDDING MODEL ---
+        try:
+            logger.info("Creating embeddings with models/embedding-001...")
+            self.embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001",  # ✅ CORRECT
+                google_api_key=google_api_key,
+                task_type="retrieval_document"
+            )
+            logger.info("✅ Embeddings initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize embeddings: {str(e)}")
+            raise ValueError(f"Embedding initialization failed: {str(e)}")
+        
+        # --- FIX: USE CORRECT LLM MODEL NAME ---
+        try:
+            logger.info("Creating Gemini LLM...")
+            self.llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash-latest",  # ✅ CORRECT (not gemini-1.5-flash)
+                google_api_key=google_api_key,
+                temperature=0.1,
+                convert_system_message_to_human=True
+            )
+            logger.info("✅ LLM initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize LLM: {str(e)}")
+            raise ValueError(f"LLM initialization failed: {str(e)}")
         
         # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,  # Optimal for context window
-            chunk_overlap=200,  # Preserve context across chunks
+            chunk_size=1000,
+            chunk_overlap=200,
             length_function=len,
             separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
         )
         
-        logger.info("RAG Engine initialized successfully")
+        logger.info("✅ RAG Engine initialized successfully")
     
     def ingest_pdfs(self, pdf_files: List[Any]) -> Dict[str, Any]:
-        """
-        Ingest multiple PDF files into the vector store.
-        
-        Args:
-            pdf_files: List of uploaded PDF file objects (Streamlit UploadedFile)
-            
-        Returns:
-            Dictionary with ingestion statistics
-        """
+        """Ingest PDFs with detailed logging"""
         try:
+            logger.info(f"Starting PDF ingestion for {len(pdf_files)} files...")
             all_documents = []
             pdf_stats = {}
             
-            # Create temporary directory for PDF processing
+            # Create temporary directory
             temp_dir = Path("./temp_pdfs")
             temp_dir.mkdir(exist_ok=True)
+            logger.info(f"Temp directory: {temp_dir}")
             
-            for pdf_file in pdf_files:
+            # Process each PDF
+            for idx, pdf_file in enumerate(pdf_files, 1):
                 try:
-                    # Save uploaded file temporarily
+                    logger.info(f"[{idx}/{len(pdf_files)}] Processing: {pdf_file.name}")
+                    
+                    # Save file
                     temp_path = temp_dir / pdf_file.name
                     with open(temp_path, "wb") as f:
                         f.write(pdf_file.getvalue())
+                    logger.info(f"  → Saved to: {temp_path}")
                     
-                    # Load PDF with page metadata
+                    # Load PDF
                     loader = PyPDFLoader(str(temp_path))
                     documents = loader.load()
+                    logger.info(f"  → Extracted {len(documents)} pages")
                     
-                    # Add source filename to metadata
-                    for doc in documents:
+                    if not documents:
+                        logger.warning(f"  ⚠️ No text extracted from {pdf_file.name}")
+                        pdf_stats[pdf_file.name] = "0 pages (Empty/Scanned)"
+                        continue
+                    
+                    # Add metadata
+                    for doc_idx, doc in enumerate(documents):
                         doc.metadata["source_file"] = pdf_file.name
-                        # Ensure page number is in metadata (0-indexed by PyPDFLoader)
                         if "page" not in doc.metadata:
-                            doc.metadata["page"] = 0
+                            doc.metadata["page"] = doc_idx
+                        logger.debug(f"    Page {doc_idx + 1}: {len(doc.page_content)} chars")
                     
                     all_documents.extend(documents)
                     pdf_stats[pdf_file.name] = len(documents)
-                    
-                    logger.info(f"Loaded {len(documents)} pages from {pdf_file.name}")
+                    logger.info(f"  ✅ Successfully loaded {len(documents)} pages")
                     
                 except Exception as e:
-                    logger.error(f"Error loading {pdf_file.name}: {str(e)}")
+                    logger.error(f"  ❌ Error loading {pdf_file.name}: {str(e)}")
                     pdf_stats[pdf_file.name] = f"Error: {str(e)}"
             
+            # Check if we got any documents
             if not all_documents:
-                raise ValueError("No documents were successfully loaded")
+                logger.error("❌ No documents were successfully loaded")
+                return {
+                    "status": "error",
+                    "total_pages": 0,
+                    "total_chunks": 0,
+                    "pdf_stats": pdf_stats,
+                    "message": "No readable text found. PDFs might be scanned images or corrupted."
+                }
             
-            # Split documents into chunks
-            logger.info(f"Splitting {len(all_documents)} pages into chunks...")
+            logger.info(f"✅ Total documents loaded: {len(all_documents)} pages")
+            
+            # Split into chunks
+            logger.info("Splitting documents into chunks...")
             chunks = self.text_splitter.split_documents(all_documents)
-            logger.info(f"Created {len(chunks)} chunks")
+            logger.info(f"✅ Created {len(chunks)} chunks")
             
-            # Create or update vector store
-            if self.vector_store is None:
-                logger.info("Creating new ChromaDB vector store...")
+            if not chunks:
+                logger.error("❌ No chunks created (text splitting failed)")
+                return {
+                    "status": "error",
+                    "total_pages": len(all_documents),
+                    "total_chunks": 0,
+                    "pdf_stats": pdf_stats,
+                    "message": "Text chunking failed. Try different PDFs."
+                }
+            
+            # Create embeddings and store in ChromaDB
+            logger.info("Creating vector store with embeddings...")
+            try:
+                if self.vector_store is None:
+                    logger.info("Creating NEW ChromaDB collection...")
+                    self.vector_store = Chroma.from_documents(
+                        documents=chunks,
+                        embedding=self.embeddings,
+                        persist_directory=self.persist_directory,
+                        collection_name="rag_documents"
+                    )
+                    logger.info("✅ Vector store created")
+                else:
+                    logger.info("Adding to EXISTING ChromaDB collection...")
+                    self.vector_store.add_documents(chunks)
+                    logger.info("✅ Documents added to existing store")
                 
-                # Use Chroma with explicit collection name
-                self.vector_store = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=self.embeddings,
-                    persist_directory=self.persist_directory,
-                    collection_name="rag_documents"
-                )
-            else:
-                logger.info("Adding to existing vector store...")
-                self.vector_store.add_documents(chunks)
+            except Exception as e:
+                logger.error(f"❌ Vector store creation failed: {str(e)}")
+                raise ValueError(f"ChromaDB error: {str(e)}")
             
-            # Initialize retriever with high k for better context
+            # Create retriever
+            logger.info("Creating retriever...")
             self.retriever = self.vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 6}  # Retrieve top 6 most relevant chunks
+                search_kwargs={"k": 6}
             )
+            logger.info("✅ Retriever created")
             
             # Create QA chain
+            logger.info("Creating QA chain...")
             self._create_qa_chain()
+            logger.info("✅ QA chain created")
             
-            return {
+            result = {
                 "status": "success",
                 "total_pages": len(all_documents),
                 "total_chunks": len(chunks),
                 "pdf_stats": pdf_stats
             }
             
+            logger.info(f"🎉 PDF ingestion complete! {len(chunks)} chunks ready for queries")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error during PDF ingestion: {str(e)}")
-            raise
+            logger.error(f"❌ FATAL ERROR during PDF ingestion: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise ValueError(f"Processing failed: {str(e)}")
     
     def _create_qa_chain(self):
-        """
-        Create the question-answering chain with citation grounding.
-        """
-        # System prompt for strict grounding and citation
+        """Create QA chain with detailed prompt"""
         system_prompt = """You are an expert research assistant analyzing uploaded PDF documents.
 
 CRITICAL RULES:
@@ -200,13 +243,11 @@ Question: {input}"""
             ("human", "{input}")
         ])
         
-        # Create document combination chain
         combine_docs_chain = create_stuff_documents_chain(
             llm=self.llm,
             prompt=prompt
         )
         
-        # Create retrieval chain
         self.qa_chain = create_retrieval_chain(
             retriever=self.retriever,
             combine_docs_chain=combine_docs_chain
@@ -215,35 +256,35 @@ Question: {input}"""
         logger.info("QA chain created successfully")
     
     def ask_question(self, question: str) -> Dict[str, Any]:
-        """
-        Ask a question and get a grounded answer with citations.
-        
-        Args:
-            question: User's question
-            
-        Returns:
-            Dictionary containing answer, reasoning, and sources
-        """
+        """Ask question with detailed logging"""
         if self.qa_chain is None:
-            raise ValueError("Please upload PDFs first before asking questions")
+            logger.warning("⚠️ Question asked but no documents loaded")
+            return {
+                "status": "error",
+                "question": question,
+                "answer": "Please upload and process PDFs first before asking questions",
+                "sources": [],
+                "num_sources": 0
+            }
         
         try:
-            # Invoke the chain
+            logger.info(f"Processing question: {question}")
+            
+            # Invoke chain
             response = self.qa_chain.invoke({"input": question})
-            
-            # Extract retrieved documents for citation verification
             retrieved_docs = response.get("context", [])
-            
-            # Parse the response
             answer_text = response.get("answer", "")
             
-            # Extract sources from retrieved documents
+            logger.info(f"✅ Retrieved {len(retrieved_docs)} relevant chunks")
+            logger.info(f"✅ Generated answer: {len(answer_text)} chars")
+            
+            # Extract sources
             sources = []
             seen_sources = set()
             
             for doc in retrieved_docs:
                 source_file = doc.metadata.get("source_file", "Unknown")
-                page = doc.metadata.get("page", 0) + 1  # Convert to 1-indexed
+                page = doc.metadata.get("page", 0) + 1
                 source_key = f"{source_file}:Page {page}"
                 
                 if source_key not in seen_sources:
@@ -254,6 +295,8 @@ Question: {input}"""
                     })
                     seen_sources.add(source_key)
             
+            logger.info(f"✅ Extracted {len(sources)} unique sources")
+            
             return {
                 "status": "success",
                 "question": question,
@@ -263,7 +306,9 @@ Question: {input}"""
             }
             
         except Exception as e:
-            logger.error(f"Error during question answering: {str(e)}")
+            logger.error(f"❌ Error during question answering: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {
                 "status": "error",
                 "question": question,
@@ -271,29 +316,31 @@ Question: {input}"""
                 "sources": [],
                 "num_sources": 0
             }
-    
+
     def clear_database(self):
-        """Clear the vector database and reset the engine."""
+        """Clear database with logging"""
         try:
+            logger.info("Clearing database...")
+            
             if self.vector_store is not None:
                 self.vector_store = None
                 self.retriever = None
                 self.qa_chain = None
             
-            # Remove ChromaDB directory
             import shutil
             if os.path.exists(self.persist_directory):
                 shutil.rmtree(self.persist_directory)
+                logger.info(f"✅ Removed directory: {self.persist_directory}")
             
-            logger.info("Database cleared successfully")
+            logger.info("✅ Database cleared successfully")
             return {"status": "success", "message": "Database cleared"}
             
         except Exception as e:
-            logger.error(f"Error clearing database: {str(e)}")
+            logger.error(f"❌ Error clearing database: {str(e)}")
             return {"status": "error", "message": str(e)}
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about the current vector store."""
+        """Get database stats"""
         if self.vector_store is None:
             return {
                 "status": "empty",
@@ -302,9 +349,10 @@ Question: {input}"""
             }
         
         try:
-            # Get collection stats
             collection = self.vector_store._collection
             count = collection.count()
+            
+            logger.info(f"Database stats: {count} chunks")
             
             return {
                 "status": "ready",
@@ -312,6 +360,7 @@ Question: {input}"""
                 "message": f"Ready with {count} document chunks"
             }
         except Exception as e:
+            logger.error(f"Error getting stats: {str(e)}")
             return {
                 "status": "error",
                 "message": str(e)

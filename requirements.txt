@@ -5,3 +5,4 @@ langchain-community==0.2.16
 chromadb==0.4.24  
 pypdf==4.0.1
 python-dotenv==1.0.1
+onnxruntime>=1.14.0
