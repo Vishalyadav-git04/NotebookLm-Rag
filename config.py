@@ -21,7 +21,7 @@ class Config:
     
     # LLM model for generation
     # Options: "gemini-flash-latest", "gemini-1.5-pro-latest"
-    LLM_MODEL = "gemini-flash-latest"
+    LLM_MODEL = "gemini-2.0-flash"
     
     # LLM temperature (0.0 = deterministic, 1.0 = creative)
     LLM_TEMPERATURE = 0.1

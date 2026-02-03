@@ -5,7 +5,9 @@ NotebookLM-like RAG Application - FULLY FIXED
 import os
 import sys
 
+# Disable default embeddings for Chroma
 os.environ["CHROMA_ENABLE_DEFAULT_EMBEDDING"] = "false"
+
 import sqlite3
 sys.modules['pysqlite3'] = sqlite3
 
@@ -117,27 +119,45 @@ else:
     st.markdown("---")
     st.markdown("### 💬 Ask Questions")
     
+    # --- UPDATED CHAT HISTORY LOGIC START ---
     for i, chat in enumerate(st.session_state.chat_history):
         st.markdown(f"**🙋 Q{i+1}:** {chat['question']}")
         
         answer = chat['answer']
+        
+        # Check for reasoning block
         if "**Step-by-Step Reasoning:**" in answer:
-            parts = answer.split("**Answer:**")
-            reasoning = parts[0].replace("**Step-by-Step Reasoning:**", "").strip()
-            
-            if "**Sources:**" in parts[1]:
-                ans_parts = parts[1].split("**Sources:**")
-                ans = ans_parts[0].strip()
-                srcs = ans_parts[1].strip()
+            # Try splitting by "Detailed Answer" first (new format)
+            if "**Detailed Answer:**" in answer:
+                parts = answer.split("**Detailed Answer:**")
+            # Fallback to "Answer" (old format)
+            elif "**Answer:**" in answer:
+                parts = answer.split("**Answer:**")
             else:
-                ans = parts[1].strip()
-                srcs = ""
+                parts = [answer]  # Fallback if neither found
             
-            st.markdown(f'<div class="reasoning-box"><b>🧠 Reasoning:</b><br>{reasoning}</div>', unsafe_allow_html=True)
-            st.markdown(f"**✅ Answer:**\n{ans}")
-            if srcs:
-                st.markdown(f"**📚 Sources:**\n{srcs}")
+            # If split was successful
+            if len(parts) > 1:
+                reasoning = parts[0].replace("**Step-by-Step Reasoning:**", "").strip()
+                remaining = parts[1]
+                
+                if "**Sources:**" in remaining:
+                    ans_parts = remaining.split("**Sources:**")
+                    ans = ans_parts[0].strip()
+                    srcs = ans_parts[1].strip()
+                else:
+                    ans = remaining.strip()
+                    srcs = ""
+                
+                st.markdown(f'<div class="reasoning-box"><b>🧠 Reasoning:</b><br>{reasoning}</div>', unsafe_allow_html=True)
+                st.markdown(f"**✅ Detailed Answer:**\n{ans}")
+                if srcs:
+                    st.markdown(f"**📚 Sources:**\n{srcs}")
+            else:
+                # Fallback if format is weird but reasoning tag exists
+                st.markdown(f"**✅ Answer:**\n{answer}")
         else:
+            # Fallback for standard answers without reasoning
             st.markdown(f"**✅ Answer:**\n{answer}")
         
         if chat['sources']:
@@ -145,6 +165,7 @@ else:
                 for idx, s in enumerate(chat['sources'], 1):
                     st.markdown(f'<div class="source-box"><b>{idx}. <span class="citation">{s["file"]}:P{s["page"]}</span></b><br><small>{s["excerpt"]}</small></div>', unsafe_allow_html=True)
         st.markdown("---")
+    # --- UPDATED CHAT HISTORY LOGIC END ---
     
     question = st.text_input("Your question:", placeholder="What are the main topics?")
     
